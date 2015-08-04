@@ -4,7 +4,7 @@
 :- module(engine_access, [get_segments/2, get_item_size/3, engine_get_type/3,
 			  engine_get_object/4, engine_get_action/3, engine_fold/8,
 			  engine_types/2, engine_save/1, engine_save/2,
-			  engine_restore/1, engine_restore/2]).
+			  engine_load/1, engine_load/2]).
 
 :- use_module(library(http/http_header)).
 :- use_module(library(http/http_client)).

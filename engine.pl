@@ -2,429 +2,373 @@
 % Copyright 2015, Simularity, Inc
 
 :- module(engine, [
-		   engine_connect/3,
-		   engine_close/1,
-		   engine_apply/6,
-		   engine_delete/3,
-		   engine_flush/1,
+		   engine_load/3,
 		   engine_get_type/3,
 		   engine_get_object/4,
-		   engine_delete_expr/4,
-		   engine_delete_item/4,
-		   engine_synchronize/1
-		  ]).
+		   engine_save/1,
+		   engine_restore/1,
+		   engine_fold/8,
+		   engine_hash/2]).
 
 :- use_module(library(http/http_header)).
 :- use_module(library(http/http_client)).
 :- use_module(library(http/json)).
 :- use_module(library(socket)).
-:- use_module(library(barriers)).
-:- use_module(library(term_set)).
 
-:- dynamic segment/6.
-:- dynamic type_def/2.
-:- dynamic obj_def/3.
-:- dynamic action_def/2.
-:- dynamic connection/5.
+%:- dynamic segment/6.
+:- thread_local type_def/2.
+:- thread_local object_def/3.
+:- thread_local action_def/2.
+:- thread_local segment/3.
+:- thread_local segment_segs/1.
+:- thread_local seg_post/1.  % Mark that we can use 'Keep-Alive' on conn
+
+%:- dynamic connection/5.
 
 :- thread_local action/1.
 
 :- multifile apply_action/6.
 
-safe_close(Str) :-
-	catch(close(Str), _, true).
+:- meta_predicate engine_load(+,+,1).
 
-engine_close(Name) :-
-	findall(term(Host, Sport, Queue),
-		segment(index(Name, _Seg), Host, _Port, Sport, _Thread, Queue),
-		TermList),
+engine_hash(Atom, Hash) :-
+	atom_codes(Atom, String),
+	engine_hash(String, 5381, Hash).
 
-	retractall(segment(index(Name, _), _, _, _, _, _)),
-	retractall(type_def(index(Name, _), _)),
-	retractall(obj_def(index(Name, _), _)),
-	retractall(action_def(index(Name, _), _)),
-	retractall(connection(Name, _, _, _)),
-	maplist(term_thread, TermList),
-	barrier_delete(Name).
+engine_hash([], Hash, Hash).
+engine_hash([V | T], Val, Hash) :-
+	Next is (((Val << 5) + Val) + V) mod 0x7fffffffffffffff,
+	engine_hash(T, Next, Hash).
 
-term_thread(term(Host, Sport, Q)) :-
-	transact(Host, Sport, Q),
-	term_set_delete(Q).
 
-engine_connect(Name, Host, Port) :-
+retract_pred(Pred) :-
+	Closure =.. [Pred, _],
+	retractall(Closure).
+
+clear_local_preds :- 
+	findall(Pred, segment(_, _, Pred), Preds),
+	maplist(retract_pred, Preds),
+	retractall(type_def(_, _)),
+	retractall(object_def(_, _, _)),
+	retractall(action_def(_, _)),
+	retractall(segment(_, _, _)),
+	retractall(segment_segs(_)),
+	retractall(seg_post(_)).
+
+
+% engine_connect sets thread_local predicates that guide the loading
+engine_connect(Host:Port) :-
 
 	format(atom(URL), 'http://~w:~w/segments', [Host, Port]),
-	
+	% This one doesn't have keep alive
 	http_get(URL, JSON, []),
 	atom_json_term(JSON, JTerm, []),
 	JTerm = json(JSONList),
 	member(segments=JList, JSONList),
-	(catch(set_segments(JList, Name), Exception,
-	       (format('~w~n', [Exception]), fail)) ->
-	 length(JList, NSegs),
-	 assertz(connection(Name, Host, Port, NSegs)),
-	 BCount is NSegs + 1,
-	 barrier_create(Name, BCount)
-	;
-	 engine_close(Name),
-	 fail).
+	maplist(set_segment, JList),
+	length(JList, NSegs),
+	asserta(segment_segs(NSegs)).
 
-engine_synchronize(Name) :-
-	synchronize(Name).
-synchronize(Name) :-
-	findall(sync(Host, Sport, Queue), segment(index(Name, _), Host, _, Sport, _Thread, Queue),
-		QueueList),
-
-	maplist(send_sync, QueueList),
-	barrier_wait(Name, _).
-
-send_sync(sync(Host, Sport, Queue)) :-
-	transact(Host, Sport, Queue).
-
-set_segments([], _Name).
-set_segments([json(List) | T], Name) :-
+% set_segment sets the tl predicate segment/4 which allows the 
+set_segment(json(List)) :-
 	format('~w~n', [List]),
 	member(segment=Seg, List),
 	member(host=Host, List),
-	member(port=Port, List),
 	member(sport=Sport, List),
-	term_set_create(Queue),
-	% TID is a holdover
-	assertz(segment(index(Name, Seg), Host, Port, Sport, _TID, Queue)),
-	!,
-	set_segments(T, Name).
+	atomic_list_concat([set_segment_, Seg], SegPred),
+	thread_local(SegPred/1),
+	
+% assert the segment. Remember that this is thread local
+	assertz(segment(Seg, Host:Sport, SegPred)).
 
-transact(Host, Port, TS) :-
-	!,
-	format(atom(URL), 'http://~w:~w/load_data', [Host, Port]),
-	term_set_bind(TS, Codes),
-	term_set_clear(TS),
-	catch(http_post(URL, codes(Codes), _Result, []), X, (!, sleep(0.5), format('ERROR: ~w~n', [X]), 
-							     transact(Host, Port, TS))).
 
-accumulate(Host, Port, Message, TS) :-
-	test_message(Message, TS),
-	% transact fails or succeeds based on final. terminate will succeed
-
-	transact(Host, Port, TS).
-
-% Always succeed, just don't always transact
-accumulate(_Host, _Port, _Message, _TS).
-
-% Add test_message values if you want to manipulate the elements
-test_message(X, TS) :-
-	X =.. [triple | _],
-	term_set_add(TS, X),
-	random_between(0, 10000, 0).
-%	count_to_n(10000).
-
-:- thread_local counter/1.
-
-count_to_n(N) :-
-	(counter(M) ->
-	 retract(counter(M))
-	;
-	 M = 0),
-	K is M + 1,
-	(N = K ->
-	 true
-	;
-	 asserta(counter(K)),
-	 fail).
-
-sync(Name) :-
-	barrier_wait(Name, _),
+engine_load(HostSpec, Volume, Closure) :-
+	clear_local_preds,
+	engine_connect(HostSpec),
+	% Start with a clean TL Database
+	call(Closure, Term),
+	apply(HostSpec, Volume, Term),
 	fail.
 
-get_action(Name, Action, Code) :-
-	assure_connection(Name), 
-	(action_def(index(Name, Action), Code) ->
+engine_load(_Host:_Spec, _Volume, _Closure) :-
+% First, we flush our transactions
+	segment_segs(NSegs),
+	TopSeg is NSegs - 1,
+	transact_all(TopSeg),
+	% To finish, retract all our stuff
+	clear_local_preds.
+
+transact_all(Seg) :-
+	(Seg < 0 ->
 	 true
 	;
-	 connection(Name, Host, Port, _NSegs),
+	 transact(Seg),
+	 Next is Seg - 1,
+	 transact_all(Next)).
+
+
+transact(Seg) :-
+	catch(transact_(Seg), E, (!, format('Exception ~w~n', [E]),
+				  transact(Seg))).
+
+transact_(Seg) :-
+	segment(Seg, Host:Port, SegPred),
+	Closure =.. [SegPred, Term],
+	findall(Term, Closure, Output),
+
+	
+	% Alter the list to Codes for use with http_post
+	write_term_to_codes(Output, Codes, []),
+	!,
+	format(atom(URL), 'http://~w:~w/load_data', [Host, Port]),
+	(seg_post(Seg) ->
+	 Parms = ['Keep-Alive']
+	;
+	 
+	 Parms = [],
+	 assertz(seg_post(Seg))),
+	
+	http_post(URL, codes(Codes), _Result, Parms),
+	retractall(Closure).
+
+get_action(Host:Port, Action, Code) :-
+	(action_def(Action, Code) ->
+	 true
+	;
 	 format(atom(URL), 'http://~w:~w/convert_action?name=~w',
 		[Host, Port, Action]),
 
-	 http_get(URL, JDoc, []),
+	 http_get(URL, JDoc, [connection('Keep-Alive')]),
 	 
 	 ((atom_json_term(JDoc, JSon, []), JSon = json(JList),
 	   member(status=0, JList), member(id=Code, JList)) ->
-	  asserta(action_def(index(Name, Action), Code))
+	  asserta(action_def(Action, Code))
 	 ;
-	  throw(error(web_transaction(Name, URL), get_action/3)))).
+	  throw(error(web_transaction(Host:Port, URL), get_action/3)))).
 
 
-get_object(Name, Type, ObjName, Code) :-
-	assure_connection(Name), 
+get_object(Host:Port, Type, ObjName, Code) :-
 	Type =.. [Class, TypeNum],
 	(atom(TypeNum) ->
-	 get_type(Name, Type, TypeId)
+	 get_type(Host:Port, Type, TypeId)
 	;
 	 TypeNum = TypeId),
 	TypeSpec =.. [Class, TypeId],
-	(obj_def(index(Name, ObjName), TypeSpec, Code) ->
+	(object_def(ObjName, TypeSpec, Code) ->
 	 true
 	;
-	 connection(Name, Host, Port, _NSegs),
 	 uri_encoded(query_value, ObjName, Encoded), 
 	 format(atom(URL), 'http://~w:~w/convert_object?name=~w&class=~w&type=~w', [Host, Port, Encoded, Class, TypeId]),
 
-	 http_get(URL, JDoc, []),
+	 http_get(URL, JDoc, [connection('Keep-Alive')]),
 
 	 ((atom_json_term(JDoc, Json, []),
 	   Json=json(JList), member(status=0, JList),
 	   member(id=Code, JList)) ->
 
-	  asserta(obj_def(index(Name, ObjName), TypeSpec, Code))
+	  asserta(object_def(ObjName, TypeSpec, Code))
 	 ;
-	  throw(error(web_transaction(Name, URL), get_object/4)))).
+	  throw(error(web_transaction(Host:Port, URL), get_object/4)))).
 
-engine_get_type(Name, Type, Code) :-
-	get_type(Name, Type, Code).
+engine_get_type(Spec, Type, Code) :-
+	get_type(Spec, Type, Code).
 
-engine_get_object(Name, Type, ObjName, Code) :-
-	get_object(Name, Type, ObjName, Code).
+engine_get_object(Spec, Type, ObjName, Code) :-
+	get_object(Spec, Type, ObjName, Code).
 
-get_type(Name, Type, Code) :-
-	assure_connection(Name),
+get_type(Host:Port, Type, Code) :-
 	Type =.. [Class, TypeId],
-	(resolve_type(Name, Type, Code) ->
+	(resolve_type(Type, Code) ->
 	 true
 	;
-	 connection(Name, Host, Port, _NSegs),
 	 format(atom(URL), 'http://~w:~w/convert_type?class=~w&name=~w', [Host, Port, Class, TypeId]),
-	 http_get(URL, JDoc, []),
+	 http_get(URL, JDoc, [connection('Keep-Alive')]),
 	 ((atom_json_term(JDoc, JSON, []),
 	   JSON=json(JList), member(status=0, JList),
 	   member(id=Code, JList)) ->
-	  assertz(type_def(index(Name, Type), Code))
+	  assertz(type_def(Type, Code))
 	 ;
-	  throw(error(web_transaction(Name, URL), get_type/3)))).
+	  throw(error(web_transaction(Host:Port, URL), get_type/3)))).
 
-resolve_type(Name, Type, Code) :-
+resolve_type(Type, Code) :-
 	Type =.. [_Class, TypeSpec],
 	(atom(TypeSpec) ->
-	 type_def(index(Name, Type), Code)
+	 type_def(Type, Code)
 	;
 	 Code = TypeSpec).
 
-engine_apply(Name, SType, SObj, Action, OType, OObj) :-
-	assure_connection(Name),
-	catch(engine_apply_(Name, SType, SObj, Action,
-			    OType, OObj),
-	      Exception,
-	      (engine_close(Name), throw(Exception))).
-
-engine_apply_(Name, SType, SObj, Action, OType, OObj):-
+% Apply an "Add Triple"
+apply(Host:Port, Volume, Term) :-
+	Term = triple(SType, SObj, Action, OType, OObj),
+	!,
 	(atom(SType) ->
-	 get_type(Name, subject(SType), STypeId)
+	 get_type(Host:Port, subject(SType), STypeId)
 	;
 	 STypeId = SType),
 
 	(atom(OType) ->
-	 get_type(Name, object(OType), OTypeId)
+	 get_type(Host:Port, object(OType), OTypeId)
 	;
 	 OTypeId = OType),
 
 	(atom(SObj) ->
-	 get_object(Name, subject(STypeId), SObj, SObjId)
+	 get_object(Host:Port, subject(STypeId), SObj, SObjId)
 	;
 	 SObjId = SObj),
 
 	(atom(OObj) ->
-	 get_object(Name, object(OTypeId), OObj, OObjId)
+	 get_object(Host:Port, object(OTypeId), OObj, OObjId)
 	;
 	 OObjId = OObj),
 
 	(atom(Action) ->
-	 get_action(Name, Action, ActionId)
+	 get_action(Host:Port, Action, ActionId)
 	;
 	 ActionId = Action),
 	
-	connection(Name, _, _, NSegs),
+	segment_segs(NSegs),
 
 	OSeg is floor(OObjId) mod NSegs,
 	SSeg is floor(SObjId) mod NSegs,
-	segment(index(Name, OSeg), OHost, _, OSport, _OThr, OQ),
-	segment(index(Name, SSeg), SHost, _, SSport, _SThr, SQ),
+	% Pass them down to the accumulator
+	accumulate(OSeg, Volume,
+		   triple(subject(STypeId, SObjId), ActionId,
+			  object(OTypeId, OObjId))),
 
-	accumulate(OHost, OSport, triple(subject(STypeId, SObjId),
-					 ActionId,
-					 object(OTypeId, OObjId)), OQ),
-	
-	accumulate(SHost, SSport, triple(object(OTypeId, OObjId),
-					 ActionId,
-					 subject(STypeId, SObjId)), SQ),
-	(apply_action(Name, STypeId, SObjId, ActionId, OTypeId,
-		      OObjId) ->
-	 true
-	;
-	 true), !.
+	accumulate(SSeg, Volume,
+		   triple(object(OTypeId, OObjId), ActionId,
+			  subject(STypeId, SObjId))).
 
-map_types(subject(ST, SO), object(OT, OO),
-	  subject(ST, SO), object(OT, OO)) :- !.
-
-map_types(object(OT, OO), subject(ST, SO),
-	  subject(ST, SO), object(OT, OO)) :- !.
-
-map_types(A, B, _, _) :-
-	throw(error(type_error(subject-object, [A, B]),
-		    map_types/4)).
-
-engine_delete(Name, First, Second) :-
-	assure_connection(Name),
-	map_types(First, Second, Subject, Object),
-	Subject = subject(SType, SObj),
-	Object = object(OType, OObj),
-	catch(engine_delete_(Name, SType, SObj,
-			    OType, OObj),
-	      Exception,
-	      (engine_close(Name), throw(Exception))).
-
-engine_delete_(Name, SType, SObj, OType, OObj):-
+% Apply a "delete Triple
+apply(Host:Port, Volume, Term) :-
+	Term = triple(SType, SObj, OType, OObj),
+	!,
 	(atom(SType) ->
-	 get_type(Name, subject(SType), STypeId)
+	 get_type(Host:Port, subject(SType), STypeId)
 	;
 	 STypeId = SType),
 
 	(atom(OType) ->
-	 get_type(Name, object(OType), OTypeId)
+	 get_type(Host:Port, object(OType), OTypeId)
 	;
 	 OTypeId = OType),
 
 	(atom(SObj) ->
-	 get_object(Name, subject(STypeId), SObj, SObjId)
+	 get_object(Host:Port, subject(STypeId), SObj, SObjId)
 	;
 	 SObjId = SObj),
 
 	(atom(OObj) ->
-	 get_object(Name, object(OTypeId), OObj, OObjId)
+	 get_object(Host:Port, object(OTypeId), OObj, OObjId)
 	;
 	 OObjId = OObj),
 
-	connection(Name, _, _, NSegs),
+	segment_segs(NSegs),
 
-	OSeg is OObjId mod NSegs,
-	SSeg is SObjId mod NSegs,
-	segment(index(Name, OSeg), OHost, _, OSport, _OThr, OQ),
-	segment(index(Name, SSeg), SHost, _, SSport, _SThr, SQ),
+	OSeg is floor(OObjId) mod NSegs,
+	SSeg is floor(SObjId) mod NSegs,
 
-	
-	accumulate(OHost, OSport, triple(subject(STypeId, SObjId),
-					 object(OTypeId, OObjId)), OQ),
-	accumulate(SHost, SSport, triple(object(OTypeId, OObjId),
-					 subject(STypeId, SObjId)), SQ),
-	!.
-assure_connection(Name) :-
-	connection(Name, _, _, _), !.
+	% Pass them down to the accumulator
+	accumulate(OSeg, Volume,
+		   triple(subject(STypeId, SObjId), object(OTypeId, OObjId))),
 
-assure_connection(Name) :-
-	throw(error(connection(Name), _)).
+	accumulate(SSeg, Volume,
+		   triple(object(OTypeId, OObjId), subject(STypeId, SObjId))).
 
 
-engine_flush(Name) :-
-	engine_synchronize(Name).
-
-engine_delete_expr(Name, Expr, ActionList, TypeList) :-
-	maplist(url_action, ActionList, ActPart),
-	maplist(url_types, TypeList, TypePart),
-	atomic_list_concat(ActPart, '&', ActAtom),
-	atomic_list_concat(TypePart, '&', TypeAtom),
-
-	connection(Name, Host, Port, _Segs),
-	format(atom(URL), 'http://~w:~w/expr_receivers?~w&~w', [Host, Port, ActAtom, TypeAtom]),
-	format_to_codes('~q.', [Expr], Codes), 
-	repeat,
-	
-	catch(http_post(URL, codes(Codes), Result, []), _,
-	      (!, sleep(0.5),
-	       engine_delete_expr(Name, Expr, ActionList, TypeList))),
-	atom_json_term(Result, Json, []), 
-	(Json = json([status=0, receivers=JsonRecv])
-	->
-	 maplist(json_receiver, JsonRecv, Receivers)
+accumulate(Seg, Volume, Term) :-
+	segment(Seg, _, SegPred),
+	Closure =.. [SegPred, Term],
+	assertz(Closure),
+	Head =.. [SegPred, _],
+	predicate_property(Head, number_of_clauses(Next)), 
+	(Next >= Volume ->
+	 transact(Seg)
 	;
-	 throw(error(type_error(receiver_json, Json),
-		     engine_delete/3))),
-	
-	maplist(engine_delete_item(Name, ActionList,
-				   TypeList),
-		Receivers),
+	 true).
 
-	sleep(0.5),
-	Receivers = [],
-	!.
 
-url_action(forward(Action), Atom) :-
-	atomic(Action),
-	atom_term(Atom, faction=Action), !.
-url_action(reverse(Action), Atom) :-
-	atomic(Action),
-	atom_term(Atom, raction=Action), !.
-url_action(Action, Atom) :-
-	atomic(Action),
-	atom_term(Atom, action=Action), !.
+engine_save(Host:Port) :-
+	format(atom(URL), 'http://~w:~w/save', [Host, Port]),
+	http_get(URL, Res, []),
 
-url_action(Action, _) :-
-	throw(error(type_error(action, Action),
-		    url_action/2)).
+	atom_json_term(Res, JTerm, []),
+	JTerm = json(JSONList),
+	member(status=0, JSONList), !.
 
-url_types(subject(Stype), Atom) :-
-	atomic(Stype),
-	atom_term(Atom, stype=Stype), !.
+engine_restore(Host:Port) :-
+	format(atom(URL), 'http://~w:~w/restore', [Host, Port]),
+	http_get(URL, Res, []),
 
-url_types(object(Otype), Atom) :-
-	atomic(Otype),
-	atom_term(Atom, otype=Otype), !.
+	atom_json_term(Res, JTerm, []),
+	JTerm = json(JSONList),
+	member(status=0, JSONList), !.
 
-url_types(Obj, _) :-
-	throw(error(type_error(sim_object, Obj),
-		    url_types/2)).
+map_action(forward(Val), faction=Val).
+map_action(reverse(Val), raction=Val).
+map_action(Val, action=Val) :- atomic(Val).
 
-atom_term(Atom, Term) :-
-	format(atom(Atom), '~w', [Term]).
+map_type(subject(S), stype=S).
+map_type(object(O), otype=O).
 
-json_receiver(json(Json), Object) :-
-	member(class=Class, Json),
-	member(type=Type, Json),
-	member(item=Item, Json),
-	Object =.. [Class, Type, Item], !.
+engine_fold(Host:Port, Expr, Actions, Types, Metric, Legit, Count, Res) :-
+	write_term_to_codes(Expr, Codes, []),
+	maplist(map_action, Actions, URL_Act),
+	maplist(map_type, Types, URL_Type),
 
-json_receiver(Json, _) :-
-	throw(error(type_error(receiver_json, Json),
-		    json_receiver/2)).
-
-engine_delete_item(Name, ActionList, TypeList, Obj) :-
-
-	(member(Obj, [subject(_, _), object(_, _)]) ->
-	 true
+	flatten([URL_Act, URL_Type, [metric=Metric, legit=Legit,
+				     count=Count, use_legit=true]],
+		URL_Terms),
+	maplist(term_to_atom, URL_Terms, URL_Atoms),
+	atomic_list_concat(URL_Atoms, '&', URL_String),
+	format(atom(URL), 'http://~w:~w/expression?~w', [Host, Port,
+							 URL_String]),
+	format('~w~n', [URL]),
+	http_post(URL, codes(Codes), Result, []),
+	atom_json_term(Result, JTerm, []),
+	JTerm = json(JSONList),
+	member(status=Status, JSONList),
+	(Status =:= 0 ->
+	 member(a1=A1, JSONList),
+	 member(global=Global, JSONList),
+	 member(correlation=Corr, JSONList),
+	 maplist(corr_to_term, Corr, List),!,
+	 Res = results(A1, Global, List)
 	;
-	 throw(error(type_error(sim_object, Obj),
-		     engine_delete_item/6))),
+	 throw(status(Status))).
 
-	maplist(url_action, ActionList, ActPart),
-	maplist(url_types, TypeList, TypePart),
-	atomic_list_concat(ActPart, '&', ActAtom),
-	atomic_list_concat(TypePart, '&', TypeAtom),
+corr_to_term(json(JList), correlation(Type, Item, Value, I, A2)) :-
+	member(type=Type, JList),
+	member(item=Item, JList),
+	member(value=Value, JList),
+	member(i=I, JList),
+	member(a2=A2, JList), !.
 
-	connection(Name, Host, Port, _Segs),
-	format(atom(URL), 'http://~w:~w/expr_receivers?~w&~w', [Host, Port, ActAtom, TypeAtom]),
-	format_to_codes('~q.', [Obj], Codes),
-	repeat,
 	
-	catch(http_post(URL, codes(Codes), Result, []), _,
-	      (!, sleep(0.5),
-	       engine_delete_item(Name, ActionList, TypeList, Obj))),
-	atom_json_term(Result, Json, []),
-	(Json = json([status=0, receivers=JsonRecv])
-	->
-	 maplist(json_receiver, JsonRecv, Receivers)
+
+test_values(Count, STRange, SORange, OTRange, OORange,
+	    triple(St, Si, 1, Ot, Oi)) :-
+	between(1, STRange, STv),
+	between(1, SORange, SOv),
+	between(1, OTRange, OTv),
+	between(1, OORange, OOv),
+	(Count = count(M) ->
+	 N is M + 1,
+	 nb_setarg(1, Count, N),
+	 (N mod 10000 =:= 0 ->
+	  format('Iteration ~w~n', N)
+	 ;
+	  true)
 	;
-	 throw(error(type_error(receiver_json, Json),
-		     engine_delete_item/3))),
-	
-	maplist(engine_delete(Name, Obj), Receivers),
-	synchronize(Name),
-	Receivers = [],
-	!.
+	 true), 
 
+%	atomic_list_concat([subject_, STv], St),
+%	atomic_list_concat([sobj_, SOv], Si),
+%	atomic_list_concat([object_, OTv], Ot),
+%	atomic_list_concat([oobj_, OOv], Oi).
+
+	St = STv,
+	Si = SOv,
+	Ot = OTv,
+	Oi = OOv.
+	

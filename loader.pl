@@ -2,7 +2,7 @@
 
 % Copyright 2015, Simularity, Inc.
 
-:- module(loader, [engine_load/2]).
+:- module(loader, [engine_load_triples/2]).
 :- use_module(engine_access).
 
 :- use_module(library(http/http_header)).
@@ -149,7 +149,7 @@ engine_load_(_, _) :-
 	term_threads(false),
 	clear_preds.
 
-engine_load(Source, Closure) :-
+engine_load_triples(Source, Closure) :-
 	catch(engine_load_(Source, Closure), X,
 	      (term_threads(true), clear_preds, throw(X))).
 

@@ -15,6 +15,8 @@
 
 :- dynamic debug_mode/0.
 
+:- meta_predicate engine_load_triples(+, 3).
+
 engine_load_debug :-
     asserta(debug_mode).
 

@@ -81,8 +81,8 @@ engine_get_object(Host:Port, ObjName, Type, Code) :-
 	((atom_json_term(JDoc, Json, []),
 	  Json=json(JList), member(status=0, JList),
 	  member(id=Code, JList)) ->
-
-	 asserta(object_def(ObjName, TypeSpec, Code))
+	     atom_number(Code, ObjID), 
+	     asserta(object_def(ObjName, TypeSpec, ObjID))
 	;
 	 throw(error(web_transaction(Host:Port, URL), get_object/4))).
 

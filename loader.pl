@@ -79,14 +79,20 @@ connect(Host:Port) :-
 
 	maplist(set_segment, JList),
 	length(JList, NSegs),
-	asserta(segment_segs(NSegs)), get_item_size(Host:Port), !.
+	asserta(segment_segs(NSegs)), cached_get_item_size(Host:Port), !.
 
 connect(_) :-
 	throw(error(connect_failed), _).
 
 
 
-get_item_size(_) :-
+cached_get_item_size(Engine) :-
+    (itemsize(_, _) ->
+	 true
+     ;
+     get_item_size(Engine, Max, Min),
+     assertz(itemsize(Max, Min))).
+    
 	asserta(itemsize(0, 0xffffffff)).
 
 
@@ -144,7 +150,7 @@ transform_subject(Source, subject(TimeLine, ContextType, Context, Stamp, Bits),
 
 engine_load_(Host:Port, Closure) :-
 	catch(connect(Host:Port), Ex, (clear_preds, throw(Ex))),
-	get_item_size(Host:Port),
+	cached_get_item_size(Host:Port),
 	call(Closure, Subject, Action, Object),
 	transform_subject(Host:Port, Subject, XFormSubj), 
 	apply(Host:Port, XFormSubj, Action, Object),

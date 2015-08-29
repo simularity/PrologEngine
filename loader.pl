@@ -2,8 +2,8 @@
 
 % Copyright 2015, Simularity, Inc.
 
-:- module(loader, [engine_load_triples/2]).
-:- use_module(engine_access).
+:- module(loader, [engine_load_triples/2, engine_load_debug/0]).
+:- use_module(library(engine_access)).
 
 :- use_module(library(http/http_header)).
 :- use_module(library(http/http_client)).
@@ -12,6 +12,11 @@
 % These are the predicates that get used by load_engine
 :- thread_local segment/3, segment_segs/1, object_map/3, type_map/2, action_map/2,
 	itemsize/2.
+
+:- dynamic debug_mode/0.
+
+engine_load_debug :-
+    asserta(debug_mode).
 
 % These are caching versions of the engine_access predicates for use in iterative
 % loads
@@ -172,6 +177,10 @@ thread_exceptions :-
 
 thread_exceptions.
 
+% Handle the Debug Mode Case
+apply(_, Subject, Action, Object) :-
+    debug_mode, !,
+    format('triple(~q, ~q, ~q).~n', [Subject, Action, Object]).
 
 apply(Host:Port, Subject, Action, Object) :-
 	Subject = subject(ST, SI),

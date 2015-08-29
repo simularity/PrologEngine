@@ -1,0 +1,4 @@
+#!/bin/sh
+
+sudo cp engine_access.pl loader.pl /usr/local/simularity/library
+

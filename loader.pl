@@ -34,11 +34,15 @@ get_cached_type(Source, Name, Item) :-
 
 
 get_cached_object(Source, Name, Type, Object) :-
-	(object_map(Name, Type, Object) ->
-	 item_value(Object)
-	;
-	 engine_get_object(Source, Name, Type, Object),
+    (object_map(Name, Type, Object) ->
+	 writeln(test1(Object)),
 	 item_value(Object),
+	 writeln(test1)
+	;
+	engine_get_object(Source, Name, Type, Object),
+	writeln(test2(Object)), 
+	item_value(Object),
+	writeln(test2),
 	 (integer(Name) ; assertz(object_map(Name, Type, Object))), !).
 
 get_cached_action(Source, Name, Action) :-
@@ -145,9 +149,8 @@ transform_subject(Source, subject(TimeLine, ContextType, Context, Stamp, Bits),
 	;
 	 throw(error(stamp_overflow(Stamp, Bits), transform_subject/3))),
 	Item is (CtxID << Bits) \/ Stamp,
-	format('Item ~q~n', [Item]), 
+
 	item_value(Item),
-	writeln(tx_done).
 	
 
 engine_load_(Host:Port, Closure) :-

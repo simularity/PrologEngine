@@ -90,10 +90,10 @@ cached_get_item_size(Engine) :-
     (itemsize(_, _) ->
 	 true
      ;
-     get_item_size(Engine, Max, Min),
-     assertz(itemsize(Max, Min))).
-    
-	asserta(itemsize(0, 0xffffffff)).
+     (get_item_size(Engine, Max, Min) ->
+	  assertz(itemsize(Max, Min))
+      ;
+      asserta(itemsize(0, 0xffffffff)))).
 
 
 % set_segment sets the tl predicate segment/2 which allows access to the segments 

@@ -35,14 +35,10 @@ get_cached_type(Source, Name, Item) :-
 
 get_cached_object(Source, Name, Type, Object) :-
     (object_map(Name, Type, Object) ->
-	 writeln(test1(Object)),
-	 item_value(Object),
-	 writeln(test1)
+	 item_value(Object)
 	;
 	engine_get_object(Source, Name, Type, Object),
-	writeln(test2(Object)), 
 	item_value(Object),
-	writeln(test2),
 	 (integer(Name) ; assertz(object_map(Name, Type, Object))), !).
 
 get_cached_action(Source, Name, Action) :-
@@ -234,7 +230,7 @@ type_offset(Value) :-
 
 item_value(Value) :-
 
-	itemsize(Min, Max),
+	itemsize(Max, Min),
 	Value >= Min,
 	Value =< Max, !.
 

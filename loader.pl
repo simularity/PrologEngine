@@ -150,7 +150,7 @@ transform_subject(Source, subject(TimeLine, ContextType, Context, Stamp, Bits),
 	 throw(error(stamp_overflow(Stamp, Bits), transform_subject/3))),
 	Item is (CtxID << Bits) \/ Stamp,
 
-	item_value(Item),
+	item_value(Item).
 	
 
 engine_load_(Host:Port, Closure) :-

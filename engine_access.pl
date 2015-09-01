@@ -4,7 +4,7 @@
 :- module(engine_access, [get_segments/2, get_item_size/3, engine_get_type/3,
 			  engine_get_object/4, engine_get_action/3, engine_fold/8,
 			  engine_types/2, engine_save/1, engine_save/2,
-			  engine_load/1, engine_load/2]).
+			  engine_load/1, engine_load/2, engine_subject_indexed_fold/6]).
 
 :- use_module(library(http/http_header)).
 :- use_module(library(http/http_client)).
@@ -148,6 +148,52 @@ engine_fold(Host:Port, Expr, Actions, Types, Metric, Legit, Count, Res) :-
 	 Res = results(A1, Global, List)
 	;
 	 throw(status(Status))).
+
+engine_subject_indexed_fold(HostSpec, Context, Actions, Types,
+			    Count, Results) :-
+	maplist(map_action, Actions, URL_Act),
+	maplist(map_type, Types, URL_Type),
+
+	(Context = context(TL, CType, CT, Begin, End, Bits) ->
+	     flatten([URL_Act, URL_Type, [count=Count, timeline=TL, context=CT,
+					  context_type=CType,
+					  begin=Begin, end=End, bits=Bits]], URL_Terms)
+	 ;
+	 Context = context(TL, CT, Begin, End, Bits),
+	 flatten([URL_Act, URL_Type, [count=Count, timeline=TL, context=CT,
+				      context_type=item,
+				      begin=Begin, end=End, bits=Bits]], URL_Terms)
+	),
+	maplist(term_to_atom, URL_Terms, URL_Atoms),
+	atomic_list_concat(URL_Atoms, '&', URL_String),
+	HostSpec = Host:Port, 
+	format(atom(URL), 'http://~w:~w/subject_indexed_fold?~w', [Host, Port,
+							 URL_String]),
+	http_get(URL, JDoc, []),
+	atom_json_term(JDoc, JSon, []),
+	JSon = json(JList),
+	member(status=Status, JList),
+	(Status =:= 0 ->
+	     member(pairs=PList, JList)
+	 ;
+	 throw(status(Status))),
+
+	maplist(json_pair, PList, Pairs),
+	sort(Pairs, Results), !.
+
+json_pair(json(PData), object_pair(TimeStamp, object(OType, OItemSpec))) :-
+    member(item=Item, PData),
+    member(type=Type, PData),
+    member(timestamp=TimeStamp, PData),
+    (member(obj_name=OName, PData) ->
+	 OItemSpec = Item-OName
+     ;
+     OItemSpec = Item),
+
+    (member(typename=TName, PData) ->
+	 OType = Type-TName
+     ;
+     OType = Type).
 
 engine_types(Host:Port, TypesList) :-
 	format(atom(URL), 'http://~w:~w/types', [Host, Port]),

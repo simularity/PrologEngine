@@ -155,20 +155,21 @@ engine_subject_indexed_fold(HostSpec, Context, Actions, Types,
 	maplist(map_type, Types, URL_Type),
 
 	(Context = context(TL, CType, CT, Begin, End, Bits) ->
-	     flatten([URL_Act, URL_Type, [count=Count, timeline=TL, context=CT,
+	     flatten([URL_Act, URL_Type, [count=Count, timeline=TL, 
 					  context_type=CType,
 					  begin=Begin, end=End, bits=Bits]], URL_Terms)
 	 ;
 	 Context = context(TL, CT, Begin, End, Bits),
-	 flatten([URL_Act, URL_Type, [count=Count, timeline=TL, context=CT,
+	 
+	 flatten([URL_Act, URL_Type, [count=Count, timeline=TL,
 				      context_type=item,
 				      begin=Begin, end=End, bits=Bits]], URL_Terms)
 	),
 	maplist(term_to_atom, URL_Terms, URL_Atoms),
 	atomic_list_concat(URL_Atoms, '&', URL_String),
 	HostSpec = Host:Port, 
-	format(atom(URL), 'http://~w:~w/subject_indexed_fold?~w', [Host, Port,
-							 URL_String]),
+	format(atom(URL), 'http://~w:~w/subject_indexed_fold?~w&context=~w', [Host, Port,
+							 URL_String, CT]),
 	http_get(URL, JDoc, []),
 	atom_json_term(JDoc, JSon, []),
 	JSon = json(JList),
